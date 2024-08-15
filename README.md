@@ -12,7 +12,7 @@
 1. Import the library
 
 ```
-import k8sPriviledgedDs "github.com/redhat-best-practices-for-k8s/privileged-daemonset"
+import k8sPriviledgedDs "github.com/redhat-cne/privileged-daemonset"
 ```
 
 2. Set the K8s client to act on `Daemonset` object
