@@ -16,10 +16,6 @@ import (
 	pointer "k8s.io/utils/ptr"
 )
 
-const (
-	tolerationsPeriodSecs = 300
-)
-
 type DaemonSetClient struct {
 	K8sClient kubernetes.Interface
 }
@@ -30,14 +26,11 @@ func SetDaemonSetClient(aK8sClient kubernetes.Interface) {
 	daemonsetClient.K8sClient = aK8sClient
 }
 
-const (
-	roleSaName             = "privileged-ds"
-	waitingTime            = 5 * time.Second
-	namespaceDeleteTimeout = time.Minute * 2
-)
-
 //nolint:funlen
 func createDaemonSetsTemplate(dsName, namespace, containerName, imageWithVersion string, labelsMap map[string]string, env []v1core.EnvVar, cpuReq, cpuLim, memReq, memLim string) *appsv1.DaemonSet {
+	c := getConfig()
+	roleSaName := c.RoleServiceAccountName
+	tolerationsSeconds := pointer.To(c.TolerationPeriodSeconds)
 	dsAnnotations := make(map[string]string)
 	dsAnnotations["debug.openshift.io/source-container"] = containerName
 	dsAnnotations["openshift.io/scc"] = "node-exporter"
@@ -79,7 +72,6 @@ func createDaemonSetsTemplate(dsName, namespace, containerName, imageWithVersion
 	container.Resources.Limits[v1core.ResourceMemory] = resource.MustParse(memLim)
 	preemptPolicyLowPrio := v1core.PreemptLowerPriority
 	hostPathTypeDir := v1core.HostPathDirectory
-	tolerationsSeconds := pointer.To(int64(tolerationsPeriodSecs))
 
 	return &appsv1.DaemonSet{
 
@@ -145,10 +137,7 @@ func createDaemonSetsTemplate(dsName, namespace, containerName, imageWithVersion
 
 // This method is used to delete a daemonset specified by the name at a specified namespace
 func DeleteDaemonSet(daemonSetName, namespace string) error {
-	const (
-		Timeout = 5 * time.Minute
-	)
-
+	c := getConfig()
 	deletePolicy := metav1.DeletePropagationForeground
 	err := daemonsetClient.K8sClient.AppsV1().DaemonSets(namespace).Delete(context.TODO(), daemonSetName, metav1.DeleteOptions{PropagationPolicy: &deletePolicy})
 	if err != nil {
@@ -156,12 +145,12 @@ func DeleteDaemonSet(daemonSetName, namespace string) error {
 	}
 	dsDeleted := false
 	start := time.Now()
-	for time.Since(start) < Timeout {
+	for time.Since(start) < c.DaemonSetDeleteTimeout {
 		if !doesDaemonSetExist(daemonSetName, namespace) {
 			dsDeleted = true
 			break
 		}
-		time.Sleep(waitingTime)
+		time.Sleep(c.WaitPollInterval)
 	}
 
 	if !dsDeleted {
@@ -238,6 +227,7 @@ func CreateDaemonSet(daemonSetName, namespace, containerName, imageWithVersion s
 
 // This function is used to wait until daemonset is ready
 func WaitDaemonsetReady(namespace, name string, timeout time.Duration) error {
+	c := getConfig()
 	nodes, err := daemonsetClient.K8sClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node list, err:%s", err)
@@ -258,7 +248,7 @@ func WaitDaemonsetReady(namespace, name string, timeout time.Duration) error {
 			}
 		}
 
-		time.Sleep(waitingTime)
+		time.Sleep(c.WaitPollInterval)
 	}
 
 	if !isReady {
@@ -278,6 +268,7 @@ func isDaemonSetReady(status *appsv1.DaemonSetStatus) bool {
 
 //nolint:funlen
 func ConfigurePrivilegedServiceAccount(namespace string) error {
+	roleSaName := getConfig().RoleServiceAccountName
 	aRole := rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Role",
@@ -376,8 +367,9 @@ func namespaceIsPresent(namespace string) bool {
 
 // WaitForDeletion waits until the namespace will be removed from the cluster
 func namespaceWaitForDeletion(nsName string, timeout time.Duration) error {
+	c := getConfig()
 	//nolint:revive
-	return wait.PollUntilContextTimeout(context.TODO(), time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(context.TODO(), c.NamespaceDeletionPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
 		_, err := daemonsetClient.K8sClient.CoreV1().Namespaces().Get(context.Background(), nsName, metav1.GetOptions{})
 		if k8serrors.IsNotFound(err) {
 			return true, nil
@@ -412,7 +404,7 @@ func DeleteNamespaceIfPresent(namespace string) (err error) {
 		return fmt.Errorf("could not delete namespace %q, err: %v", namespace, err)
 	}
 	// wait for the namespace to be deleted
-	err = namespaceWaitForDeletion(namespace, namespaceDeleteTimeout)
+	err = namespaceWaitForDeletion(namespace, getConfig().NamespaceDeleteTimeout)
 	if err != nil {
 		return fmt.Errorf("failed waiting for namespace %q to be deleted, err: %v", namespace, err)
 	}
